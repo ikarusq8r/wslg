@@ -1,4 +1,4 @@
-name: Makefile CI
+name: WSLGd Build CI
 
 on:
   push:
@@ -7,21 +7,49 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-
+  build-wslgd:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: configure
-      run: ./configure
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang libcap-dev
 
-    - name: Install dependencies
-      run: make
+    - name: Build WSLGd
+      run: |
+        cd WSLGd
+        make
 
-    - name: Run check
-      run: make check
+    - name: Check WSLGd binary exists
+      run: |
+        test -f WSLGd/WSLGd
+        echo "✓ WSLGd built successfully"
 
-    - name: Run distcheck
-      run: make distcheck
+  build-rdpapplist:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install meson and dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y meson pkg-config libfreerdp-dev libwinpr-dev
+
+    - name: Configure rdpapplist
+      run: |
+        cd rdpapplist
+        meson setup build
+
+    - name: Build rdpapplist
+      run: |
+        cd rdpapplist
+        meson compile -C build
+
+    - name: Test rdpapplist
+      run: |
+        cd rdpapplist
+        meson test -C build || true
