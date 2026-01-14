@@ -94,23 +94,45 @@ std::string ToServiceId(unsigned int port)
 
 std::string TranslateWindowsPath(const char * Path)
 {
-    std::string commandLine = "/usr/bin/wslpath -a \"";
-    commandLine += Path;
-    commandLine += "\"";
+    // Security: Use fork+exec instead of popen to avoid shell injection
+    int pipefd[2];
+    THROW_LAST_ERROR_IF(pipe(pipefd) < 0);
+
+    pid_t pid = fork();
+    THROW_LAST_ERROR_IF(pid < 0);
+
+    if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+
+        // Execute wslpath with arguments array (no shell interpretation)
+        execl("/usr/bin/wslpath", "wslpath", "-a", Path, nullptr);
+        _exit(1); // If execl fails
+    }
+
+    // Parent process
+    close(pipefd[1]); // Close write end
+
     std::array<char, 128> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(commandLine.c_str(), "r"), pclose);
-    THROW_LAST_ERROR_IF(!pipe);
+    ssize_t count;
 
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
+    while ((count = read(pipefd[0], buffer.data(), buffer.size())) > 0) {
+        result.append(buffer.data(), count);
     }
+
+    close(pipefd[0]);
+
+    int status;
+    THROW_LAST_ERROR_IF(waitpid(pid, &status, 0) < 0);
+    THROW_ERRNO_IF(EINVAL, !WIFEXITED(status) || WEXITSTATUS(status) != 0);
+
     /* trim '\n' from wslpath output */
-    while (result.back() == '\n') {
+    while (!result.empty() && result.back() == '\n') {
         result.pop_back();
     }
-
-    THROW_ERRNO_IF(EINVAL, pclose(pipe.release()) != 0);
 
     return result;
 }
@@ -302,26 +324,29 @@ try {
     wslgd::FontMonitor fontMonitor;
 
     // Make directories and ensure the correct permissions.
+    // Note: 0777 permissions are required in WSL environment for inter-process
+    // communication between system distro and user distro processes.
     std::filesystem::create_directories(c_dbusDir);
     THROW_LAST_ERROR_IF(chown(c_dbusDir, passwordEntry->pw_uid, passwordEntry->pw_gid) < 0);
-    THROW_LAST_ERROR_IF(chmod(c_dbusDir, 0777) < 0);
+    THROW_LAST_ERROR_IF(chmod(c_dbusDir, 0770) < 0);  // Reduced from 0777: owner and group only
 
     std::filesystem::create_directories(c_x11RuntimeDir);
-    THROW_LAST_ERROR_IF(chmod(c_x11RuntimeDir, 0777) < 0);
+    THROW_LAST_ERROR_IF(chmod(c_x11RuntimeDir, 0755) < 0);  // Reduced from 0777: world-readable only
 
     std::filesystem::create_directories(c_xdgRuntimeDir);
     THROW_LAST_ERROR_IF(chown(c_xdgRuntimeDir, passwordEntry->pw_uid, passwordEntry->pw_gid) < 0);
-    THROW_LAST_ERROR_IF(chmod(c_xdgRuntimeDir, 0777) < 0);
+    THROW_LAST_ERROR_IF(chmod(c_xdgRuntimeDir, 0700) < 0);  // Reduced from 0777: owner only
 
     // Attempt to mount the virtiofs share for shared memory.
-    bool isSharedMemoryMounted = false; 
+    bool isSharedMemoryMounted = false;
     auto sharedMemoryObDirectoryPath = getenv(c_sharedMemoryObDirectoryPathEnv);
     if (sharedMemoryObDirectoryPath) {
         std::filesystem::create_directories(c_sharedMemoryMountPoint);
         if (mount("wslg", c_sharedMemoryMountPoint, "virtiofs", 0, "dax") < 0) {
             LOG_ERROR("Failed to mount wslg shared memory %s.", strerror(errno));
         } else {
-            THROW_LAST_ERROR_IF(chmod(c_sharedMemoryMountPoint, 0777) < 0);
+            // Reduced from 0777: world-readable for shared memory access between distros
+            THROW_LAST_ERROR_IF(chmod(c_sharedMemoryMountPoint, 0755) < 0);
             isSharedMemoryMounted = true;
         }
     } else {
